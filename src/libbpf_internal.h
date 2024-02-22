@@ -316,6 +316,12 @@ static inline bool libbpf_validate_opts(const char *opts,
 					 (opts)->sz, #type))
 #define OPTS_HAS(opts, field) \
 	((opts) && opts->sz >= offsetofend(typeof(*(opts)), field))
+/*
+* OPTS_GET宏的作用是获取选项结构体（opts）中的字段（field）的值。
+* 该宏首先检查选项结构体中是否存在指定的字段（使用OPTS_HAS宏），
+* 如果存在，则返回该字段的值；否则，返回提供的默认值（fallback_value)
+*/
+
 #define OPTS_GET(opts, field, fallback_value) \
 	(OPTS_HAS(opts, field) ? (opts)->field : fallback_value)
 #define OPTS_SET(opts, field, value)		\

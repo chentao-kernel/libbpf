@@ -388,6 +388,9 @@ struct bpf_sec_def {
 	enum bpf_prog_type prog_type;
 	enum bpf_attach_type expected_attach_type;
 	long cookie;
+	/* sec_def->handler_id = ++last_custom_sec_def_handler_id;
+	 * id递增
+	 */
 	int handler_id;
 
 	libbpf_prog_setup_fn_t prog_setup_fn;
@@ -457,6 +460,8 @@ struct bpf_program {
 	int prog_ifindex;
 	__u32 attach_btf_obj_fd;
 	__u32 attach_btf_id;
+	// 当新的prog替换老的prog时，需要将attach_prog_fd赋值为fd
+	// 参考bpf_program__set_attach_target
 	__u32 attach_prog_fd;
 
 	void *func_info;
@@ -3530,7 +3535,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 		sh = elf_sec_hdr(obj, scn);
 		if (!sh)
 			return -LIBBPF_ERRNO__FORMAT;
-
+		// 这里获得section name
 		name = elf_sec_str(obj, sh->sh_name);
 		if (!name)
 			return -LIBBPF_ERRNO__FORMAT;
@@ -3574,6 +3579,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 			if (sh->sh_flags & SHF_EXECINSTR) {
 				if (strcmp(name, ".text") == 0)
 					obj->efile.text_shndx = idx;
+				// 此处去复制section name
 				err = bpf_object__add_programs(obj, data, name, idx);
 				if (err)
 					return err;
@@ -5334,6 +5340,7 @@ bpf_core_find_cands(struct bpf_object *obj, const struct btf *local_btf, __u32 l
 
 	/* Attempt to find target candidates in vmlinux BTF first */
 	main_btf = obj->btf_vmlinux_override ?: obj->btf_vmlinux;
+	// 这里将btf名字改成真正的btf名字
 	err = bpf_core_add_cands(&local_cand, local_essent_len, main_btf, "vmlinux", 1, cands);
 	if (err)
 		goto err_out;
@@ -5467,6 +5474,7 @@ static int bpf_core_resolve_relo(struct bpf_program *prog,
 
 	if (relo->kind != BPF_CORE_TYPE_ID_LOCAL &&
 	    !hashmap__find(cand_cache, local_id, &cands)) {
+		// 查找target btf
 		cands = bpf_core_find_cands(prog->obj, local_btf, local_id);
 		if (IS_ERR(cands)) {
 			pr_warn("prog '%s': relo #%d: target candidate search failed for [%d] %s %s: %ld\n",
@@ -5501,7 +5509,7 @@ bpf_object__relocate_core(struct bpf_object *obj, const char *targ_btf_path)
 
 	if (obj->btf_ext->core_relo_info.len == 0)
 		return 0;
-
+	// targ_btf_path 表示btf文件的路径
 	if (targ_btf_path) {
 		obj->btf_vmlinux_override = btf__parse(targ_btf_path, NULL);
 		err = libbpf_get_error(obj->btf_vmlinux_override);
@@ -8972,6 +8980,7 @@ static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("tc/egress",		SCHED_CLS, BPF_TCX_EGRESS, SEC_NONE),  /* alias for tcx */
 	SEC_DEF("tcx/ingress",		SCHED_CLS, BPF_TCX_INGRESS, SEC_NONE),
 	SEC_DEF("tcx/egress",		SCHED_CLS, BPF_TCX_EGRESS, SEC_NONE),
+	// 注意tc的sec定义没有设置attach函数，因为tc是通过netlink方式去attach prog
 	SEC_DEF("tc",			SCHED_CLS, 0, SEC_NONE), /* deprecated / legacy, use tcx */
 	SEC_DEF("classifier",		SCHED_CLS, 0, SEC_NONE), /* deprecated / legacy, use tcx */
 	SEC_DEF("action",		SCHED_ACT, 0, SEC_NONE), /* deprecated / legacy, use tcx */
@@ -10271,7 +10280,7 @@ static int bpf_link_perf_detach(struct bpf_link *link)
 
 	if (ioctl(perf_link->perf_event_fd, PERF_EVENT_IOC_DISABLE, 0) < 0)
 		err = -errno;
-
+	// 什么时候两者不相等
 	if (perf_link->perf_event_fd != link->fd)
 		close(perf_link->perf_event_fd);
 	close(link->fd);
@@ -10440,7 +10449,7 @@ static int determine_uprobe_retprobe_bit(void)
 
 #define PERF_UPROBE_REF_CTR_OFFSET_BITS 32
 #define PERF_UPROBE_REF_CTR_OFFSET_SHIFT 32
-
+/* 通过__NR_perf_event_open注册 kprobe事件 */
 static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
 				 uint64_t offset, int pid, size_t ref_ctr_off)
 {
@@ -10747,7 +10756,7 @@ bpf_program__attach_kprobe_opts(const struct bpf_program *prog,
 					    -1 /* pid */, 0 /* ref_ctr_off */);
 	} else {
 		char probe_name[256];
-
+		/* 如果是老的内核则通过legacy方式注册perf事件 */
 		gen_kprobe_legacy_event_name(probe_name, sizeof(probe_name),
 					     func_name, offset);
 
@@ -11130,6 +11139,9 @@ static int attach_kprobe(const struct bpf_program *prog, long cookie, struct bpf
 	}
 
 	opts.offset = offset;
+	/* 默认从sec()中定义的函数获取func_name, 通过attach_kprobe_opts可以
+	 * 再重新定义需要trace得func
+	 * */
 	*link = bpf_program__attach_kprobe_opts(prog, func, &opts);
 	free(func);
 	return libbpf_get_error(*link);
@@ -13414,7 +13426,13 @@ int bpf_object__attach_skeleton(struct bpf_object_skeleton *s)
 		/* if user already set the link manually, don't attempt auto-attach */
 		if (*link)
 			continue;
-
+		/*
+		 * __bpf_object__open
+		 * 	prog->sec_def = find_sec_def(prog->sec_name);
+		 * 		SEC_DEF("kprobe/", KPROBE,attach_fn = attach_kprobe),
+		 *
+		 */
+		// bpf_open的时候将attach_kprobe赋值给prog_attach_fn
 		err = prog->sec_def->prog_attach_fn(prog, prog->sec_def->cookie, link);
 		if (err) {
 			pr_warn("prog '%s': failed to auto-attach: %d\n",
